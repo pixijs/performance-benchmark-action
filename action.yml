@@ -1,24 +1,19 @@
-name: The name of your action here
-description: Provide a description here
-author: Your name or organization here
-
-# Add your action's branding here. This will appear on the GitHub Marketplace.
-branding:
-  icon: heart
-  color: red
-
-# Define your inputs here.
+name: 'PixiJS Benchmark'
+description:
+  'Run PixiJS performance benchmarks via Playwright and compare to baseline'
 inputs:
-  milliseconds:
-    description: Your input description here
+  dist-path:
+    description: 'Path to the folder containing benchmark.html'
     required: true
-    default: '1000'
-
-# Define your outputs here.
-outputs:
-  time:
-    description: Your output description here
-
+    default: './dist'
+  output-file:
+    description: 'Path for writing the PR benchmark result JSON'
+    required: false
+    default: 'benchmark.json'
+  baseline-file:
+    description: 'Path to the baseline (dev) benchmark JSON file'
+    required: false
+    default: ''
 runs:
-  using: node24
-  main: dist/index.js
+  using: 'node24'
+  main: 'dist/index.js'

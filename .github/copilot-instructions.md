@@ -23,7 +23,6 @@ code it is generated from.
 | `dist/`              | Generated JavaScript Code                                |
 | `src/`               | JavaScript Source Code                                   |
 | `.env.example`       | Environment Variables Example for `@github/local-action` |
-| `.licensed.yml`      | Licensed Configuration                                   |
 | `.markdown-lint.yml` | Markdown Linter Configuration                            |
 | `.node-version`      | Node.js Version Configuration                            |
 | `.prettierrc.yml`    | Prettier Formatter Configuration                         |
@@ -78,7 +77,7 @@ npm run bundle
 - Use descriptive variable and function names that clearly convey their purpose
 - Use JSDoc comments to document functions, classes, and complex logic
 - After doing any refactoring, ensure to run `npm run test` to ensure that all
-  tests still pass and coverage requirements are met
+  tests still pass
 - When suggesting code changes, always opt for the most maintainable approach.
   Try your best to keep the code clean and follow "Don't Repeat Yourself" (DRY)
   principles
@@ -105,7 +104,7 @@ When creating a pull request (PR), please ensure that:
   them into separate, smaller PRs)
 - Formatting checks pass
 - Linting checks pass
-- Unit tests pass and coverage requirements are met
+- Unit tests pass
 - The action has been transpiled to JavaScript and the `dist` directory is
   up-to-date with the latest changes in the `src` directory
 - If necessary, the `README.md` file is updated to reflect any changes in
