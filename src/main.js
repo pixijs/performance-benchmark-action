@@ -115,60 +115,58 @@ export async function run() {
     let body = '';
     let regressionDetected = false;
 
-    if (!baselineFile || !fs.existsSync(baselineFile)) {
-      core.info('No baseline provided—posting results only.');
+    const baselineExists = baselineFile && fs.existsSync(baselineFile);
 
-      // Build comment body with results only
-      body = `
-${MARKER}
-### PixiJS Benchmark Results
-| Name | Metric | Value |
-| :--- |:-------|------:|
-`;
-      prResults.forEach((result) => {
-        const fps = Number(result.fps);
-        body += `| ${result.name} | FPS | ${fps.toFixed(2)} |\n`;
-      });
-      body += `\n_No baseline available for comparison_\n`;
-    } else {
-      // Comparison logic
-      const baseline = JSON.parse(fs.readFileSync(baselineFile));
-      const tableRows = [];
+    // Comparison logic
+    const baseline = JSON.parse(baselineExists ? fs.readFileSync(baselineFile) : '[]');
+    const tableRows = [];
 
-      for (let i = 0; i < pages.length; i++) {
-        const prResult = prResults[i];
-        const baselineResult = baseline[i];
+    for (let i = 0; i < pages.length; i++) {
+      const prResult = prResults[i];
+      const baselineResult = baseline[i];
 
-        if (!baselineResult) {
-          core.info(`No baseline result for ${pages[i]}—skip comparison.`);
-          continue;
-        }
-
-        const devFPS = Number(baselineResult.fps);
-        const prFPS = Number(prResult.fps);
-        const diffPercent = ((devFPS - prFPS) / devFPS) * 100;
-        const regression = diffPercent > perfChange;
-        const arrow = diffPercent > 0 ? '🔻' : '🔺';
-        tableRows.push({ devFPS, prFPS, diffPercent, regression, arrow });
+      if (!baselineResult) {
+        core.info(`No baseline result for ${pages[i]}—skip comparison.`);
+        tableRows.push({
+          name: prResult.name,
+          devFPS: null,
+          prFPS: Number(prResult.fps),
+          diffPercent: 'N/A',
+          regression: false,
+          arrow: null
+        });
+        continue;
       }
 
-      // Build comment body with comparison
-      body = `
+      const devFPS = Number(baselineResult.fps);
+      const prFPS = Number(prResult.fps);
+      const diffPercent = ((devFPS - prFPS) / devFPS) * 100;
+      const regression = diffPercent > perfChange;
+      const arrow = diffPercent > 0 ? '🔻' : '🔺';
+      tableRows.push({ name: prResult.name, devFPS, prFPS, diffPercent, regression, arrow });
+    }
+
+    // Build comment body with comparison
+    body = `
 ${MARKER}
 ### PixiJS Benchmark Results
 | Name | Metric | dev | PR  | Change |
 |:---|:-------|----:|----:|-------:|
 `;
-      tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow, name }) => {
-        body += `| ${name} | FPS | ${devFPS.toFixed(2)} | ${prFPS.toFixed(2)} | ${arrow} ${diffPercent.toFixed(
-          2
-        )}% |\n\n`;
-        if (regression) regressionDetected = true;
-      });
-      body += `
-${regressionDetected ? `❌ **Performance regression detected (> ${perfChange}%)**` : '✅ Performance within acceptable range'}
+    tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow, name }) => {
+      const devFPSFormatted = devFPS == null ? '⚠️' : devFPS.toFixed(2);
+      const diffPercentFormatted = diffPercent == null ? '-' : `${diffPercent.toFixed(2)}%`;
+
+      body += `| ${name} | FPS | ${devFPSFormatted} | ${prFPS.toFixed(2)} | ${arrow} ${diffPercentFormatted} |\n\n`;
+      if (regression) regressionDetected = true;
+    });
+    body += `
+${
+  regressionDetected
+    ? `❌ **Performance regression detected (> ${perfChange}%)**`
+    : '✅ Performance within acceptable range'
+}
 `;
-    }
 
     // Post or update GitHub comment
     if (token && github.context.payload.pull_request) {
