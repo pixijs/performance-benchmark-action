@@ -1,6 +1,6 @@
 import { Test } from './test.mjs'
 ;(async () => {
-  const spriteBenchmark = new Test(250000)
+  const spriteBenchmark = new Test('Sprites (50k)', 50_000)
   await spriteBenchmark.init()
   spriteBenchmark.resetMetrics()
   await spriteBenchmark.render()

@@ -1,8 +1,9 @@
 import * as PIXI from 'pixi.js'
 
 class Engine {
-  constructor(count) {
+  constructor(name, count) {
     this.count = count || 0
+    this.name = name || 'Unnamed Benchmark'
   }
   async init() {
     this.max
@@ -78,7 +79,8 @@ class Engine {
       maxFps: Math.round(this.maxFps * 100) / 100,
       frameCount: this.frameCount,
       avgFrameTime: Math.round(avgFrameTime * 100) / 100,
-      totalTime: Math.round(totalBenchmarkTime * 100) / 100
+      totalTime: Math.round(totalBenchmarkTime * 100) / 100,
+      name: this.name || 'Unnamed Benchmark'
     }
   }
 

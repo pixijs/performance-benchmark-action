@@ -1,171 +1,211 @@
-import * as core from '@actions/core'
-import * as github from '@actions/github'
-import { Octokit } from 'octokit'
-import { spawn } from 'child_process'
-import { chromium } from 'playwright'
-import fs from 'fs'
-import path from 'path'
+import * as core from '@actions/core';
+import * as github from '@actions/github';
+import { Octokit } from 'octokit';
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import handler from 'serve-handler';
+import http from 'node:http';
 
-import fetch from 'node-fetch'
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Wait for the local server to become ready
-async function waitForServer(url, retries = 20, delay = 300) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch(url)
-      if (res.ok) {
-        return true
-      }
-    } catch {
-      // not ready yet
+/**
+ * Recursively copy a directory or file
+ * @param {string} src - Source path
+ * @param {string} dest - Destination path
+ */
+function copyRecursive(src, dest) {
+  const stat = fs.statSync(src);
+
+  if (stat.isDirectory()) {
+    fs.mkdirSync(dest, { recursive: true });
+    const entries = fs.readdirSync(src);
+
+    for (const entry of entries) {
+      copyRecursive(path.join(src, entry), path.join(dest, entry));
     }
-    await new Promise((r) => setTimeout(r, delay))
+  } else {
+    fs.copyFileSync(src, dest);
   }
-  throw new Error(`Server at ${url} did not respond after ${retries * delay}ms`)
 }
 
 export async function run() {
-  let server
+  let server;
   try {
-    const distPath = path.resolve(core.getInput('dist-path'))
-    const outputFile = core.getInput('output-file')
-    const baselineFile = core.getInput('baseline-file')
-    const token = process.env.GITHUB_TOKEN
+    const distPath = path.resolve(core.getInput('dist-path'));
+    const outputFile = core.getInput('output-file');
+    const baselineFile = core.getInput('baseline-file');
+    const perfChange = Number(core.getInput('perf-change'));
+    const token = process.env.GITHUB_TOKEN;
 
     if (!fs.existsSync(distPath)) {
-      throw new Error(`dist path not found: ${distPath}`)
+      throw new Error(`dist path not found: ${distPath}`);
+    }
+
+    // check that pixi.mjs exists
+    const pixiPath = path.join(distPath, 'pixi.mjs');
+    if (!fs.existsSync(pixiPath)) {
+      core.setFailed(`pixi.mjs not found in dist path: ${pixiPath}`);
+      return;
     }
 
     // copy dist to current folder
-    core.startGroup('📂 Copy dist files')
+    core.startGroup('📂 Copy dist files');
     // ensure temp folder exists
-    fs.mkdirSync('./temp', { recursive: true })
+    const tempPath = path.join(__dirname, 'temp');
+    fs.mkdirSync(tempPath, { recursive: true });
     fs.readdirSync(distPath).forEach((file) => {
-      fs.copyFileSync(path.join(distPath, file), path.join('./temp', file))
-    })
-    core.endGroup()
+      const srcPath = path.join(distPath, file);
+      const destPath = path.join(tempPath, file);
+      // log paths
+      core.info(`Copying ${srcPath} to ${destPath}`);
+      copyRecursive(srcPath, destPath);
+    });
+    core.endGroup();
 
     // Serve the built dist folder
-    core.startGroup('🚀 Start local server')
-    server = spawn('npx', ['http-server', './', '-p', '8080', '--silent'], {
-      detached: true,
-      stdio: 'ignore'
-    })
+    core.startGroup('Start local server');
+    const actionRoot = __dirname;
+    server = http.createServer((req, res) => {
+      return handler(req, res, {
+        public: actionRoot
+      });
+    });
+
+    await new Promise((resolve) => {
+      server.listen(8080, resolve);
+    });
     // loop through all benchmark pages
-    const pages = ['http://localhost:8080/dist/benchmark/sprite/index.html']
-    await waitForServer(pages[0])
-    core.endGroup()
+    const pages = ['http://localhost:8080/benchmarks/sprite/'];
+    core.endGroup();
 
     // Launch Playwright Chromium
-    core.startGroup('🧪 Run headless benchmark in Playwright')
-    const browser = await chromium.launch({ headless: false })
-    const prResults = []
+    core.startGroup('Run headless benchmark in Playwright');
+    // force gpu
+    const browser = await chromium.launch({
+      headless: false,
+      args: ['--use-gl=angle']
+    });
+    const prResults = [];
     for (const pageUrl of pages) {
-      const page = await browser.newPage()
-      await page.goto(pageUrl)
+      const page = await browser.newPage();
+      await page.goto(pageUrl);
 
       // Wait for benchmark result to appear
-      core.info('Waiting for benchmarkResult...')
+      core.info('Waiting for benchmarkResult...');
       const resultHandle = await page.waitForFunction(
         // eslint-disable-next-line no-undef
         () => window.benchmarkResult,
         { timeout: 30_000 }
-      )
-      const prResult = await resultHandle.jsonValue()
-      prResults.push(prResult)
-      core.info(
-        `✅ Benchmark completed for ${pageUrl}: ${JSON.stringify(prResult)}`
-      )
-      await page.close()
+      );
+      const prResult = await resultHandle.jsonValue();
+      prResults.push(prResult);
+      core.info(`✅ Benchmark completed for ${pageUrl}: ${JSON.stringify(prResult)}`);
+      await page.close();
     }
-    await browser.close()
+    await browser.close();
 
-    fs.writeFileSync(outputFile, JSON.stringify(prResults, null, 2))
-    core.info(`🏁 Benchmark result: ${JSON.stringify(prResults, null, 2)}`)
-    core.endGroup()
+    fs.writeFileSync(outputFile, JSON.stringify(prResults, null, 2));
+    core.info(`🏁 Benchmark result: ${JSON.stringify(prResults, null, 2)}`);
+    core.endGroup();
 
     // --- Comparison and PR Comment ---
+    const MARKER = '<!-- PIXIJS_BENCHMARK_COMMENT -->';
+    let body = '';
+    let regressionDetected = false;
+
     if (!baselineFile || !fs.existsSync(baselineFile)) {
-      core.info('No baseline provided—skip comparison.')
-      return
-    }
+      core.info('No baseline provided—posting results only.');
 
-    const baseline = JSON.parse(fs.readFileSync(baselineFile))
-    const tableRows = []
-    let regressionDetected = false
-    // compare all pages
-    for (let i = 0; i < pages.length; i++) {
-      const prResult = prResults[i]
-      const baselineResult = baseline[i]
+      // Build comment body with results only
+      body = `
+${MARKER}
+### PixiJS Benchmark Results
+| Name | Metric | Value |
+| :--- |:-------|------:|
+`;
+      prResults.forEach((result) => {
+        const fps = Number(result.fps);
+        body += `| ${result.name} | FPS | ${fps.toFixed(2)} |\n`;
+      });
+      body += `\n_No baseline available for comparison_\n`;
+    } else {
+      // Comparison logic
+      const baseline = JSON.parse(fs.readFileSync(baselineFile));
+      const tableRows = [];
 
-      if (!baselineResult) {
-        core.info(`No baseline result for ${pages[i]}—skip comparison.`)
-        continue
+      for (let i = 0; i < pages.length; i++) {
+        const prResult = prResults[i];
+        const baselineResult = baseline[i];
+
+        if (!baselineResult) {
+          core.info(`No baseline result for ${pages[i]}—skip comparison.`);
+          continue;
+        }
+
+        const devFPS = Number(baselineResult.fps);
+        const prFPS = Number(prResult.fps);
+        const diffPercent = ((devFPS - prFPS) / devFPS) * 100;
+        const regression = diffPercent > perfChange;
+        const arrow = diffPercent > 0 ? '🔻' : '🔺';
+        tableRows.push({ devFPS, prFPS, diffPercent, regression, arrow });
       }
 
-      const devFPS = Number(baselineResult.fps)
-      const prFPS = Number(prResult.fps)
-      const diffPercent = ((devFPS - prFPS) / devFPS) * 100
-      const regression = diffPercent > 5
-      const arrow = diffPercent > 0 ? '🔻' : '🔺'
-      tableRows.push({ devFPS, prFPS, diffPercent, regression, arrow })
-    }
-    const MARKER = '<!-- PIXIJS_BENCHMARK_COMMENT -->'
-
-    // build a comment body that includes all benchmark results
-    let body = `
+      // Build comment body with comparison
+      body = `
 ${MARKER}
-### 🧪 PixiJS Benchmark Results
-| Metric | dev | PR  | Change |
-|:-------|----:|----:|-------:|
-`
-    tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow }) => {
-      body += `| FPS | ${devFPS.toFixed(2)} | ${prFPS.toFixed(2)} | ${arrow} ${diffPercent.toFixed(2)}% |\n\n`
-      if (regression) regressionDetected = true
-    })
-    body += `
-${
-  regressionDetected
-    ? '❌ **Performance regression detected (>5%)**'
-    : '✅ Performance within acceptable range'
-}
-`
+### PixiJS Benchmark Results
+| Name | Metric | dev | PR  | Change |
+|:---|:-------|----:|----:|-------:|
+`;
+      tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow, name }) => {
+        body += `| ${name} | FPS | ${devFPS.toFixed(2)} | ${prFPS.toFixed(2)} | ${arrow} ${diffPercent.toFixed(
+          2
+        )}% |\n\n`;
+        if (regression) regressionDetected = true;
+      });
+      body += `
+${regressionDetected ? `❌ **Performance regression detected (> ${perfChange}%)**` : '✅ Performance within acceptable range'}
+`;
+    }
 
+    // Post or update GitHub comment
     if (token && github.context.payload.pull_request) {
-      const octokit = new Octokit({ auth: token })
-      const issueNumber = github.context.payload.pull_request.number
+      const octokit = new Octokit({ auth: token });
+      const issueNumber = github.context.payload.pull_request.number;
 
       const { data: comments } = await octokit.rest.issues.listComments({
         ...github.context.repo,
         issue_number: issueNumber
-      })
+      });
 
-      const existing = comments.find((c) => c.body?.includes(MARKER))
+      const existing = comments.find((c) => c.body?.includes(MARKER));
       if (existing) {
         await octokit.rest.issues.updateComment({
           ...github.context.repo,
           comment_id: existing.id,
           body
-        })
-        core.info('Updated existing benchmark comment.')
+        });
+        core.info('Updated existing benchmark comment.');
       } else {
         await octokit.rest.issues.createComment({
           ...github.context.repo,
           issue_number: issueNumber,
           body
-        })
-        core.info('Posted new benchmark comment.')
+        });
+        core.info('Posted new benchmark comment.');
       }
     }
 
     if (regressionDetected) {
-      core.setFailed(`Performance regression >5% detected.`)
+      core.setFailed(`Performance regression >${perfChange}% detected!`);
     } else {
-      core.info('✅ Performance within acceptable range.')
+      core.info('✅ Performance within acceptable range.');
     }
   } catch (err) {
-    core.setFailed(err.message)
+    core.setFailed(err.message);
   } finally {
-    if (server) process.kill(-server.pid)
+    if (server) server.close();
   }
 }
