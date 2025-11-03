@@ -3,9 +3,12 @@ description:
   'Run PixiJS performance benchmarks via Playwright and compare to baseline'
 inputs:
   dist-path:
-    description: 'Path to the folder containing benchmark.html'
+    description: 'Path to the folder containing pixi.mjs'
     required: true
     default: './dist'
+  benchmark-path:
+    description: 'Path to the folder containing the benchmarks'
+    required: true
   output-file:
     description: 'Path for writing the PR benchmark result JSON'
     required: false

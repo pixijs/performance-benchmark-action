@@ -10,30 +10,25 @@ import http from 'node:http';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/**
- * Recursively copy a directory or file
- * @param {string} src - Source path
- * @param {string} dest - Destination path
- */
-function copyRecursive(src, dest) {
-  const stat = fs.statSync(src);
-
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dest, { recursive: true });
-    const entries = fs.readdirSync(src);
-
-    for (const entry of entries) {
-      copyRecursive(path.join(src, entry), path.join(dest, entry));
+function findRecursive(dir, fileList = []) {
+  const files = fs.readdirSync(dir);
+  files.forEach((file) => {
+    const filePath = path.join(dir, file);
+    const stat = fs.statSync(filePath);
+    if (stat.isDirectory()) {
+      findRecursive(filePath, fileList);
+    } else {
+      if (filePath.endsWith('.html')) fileList.push(filePath);
     }
-  } else {
-    fs.copyFileSync(src, dest);
-  }
+  });
+  return fileList;
 }
 
 export async function run() {
   let server;
   try {
     const distPath = path.resolve(core.getInput('dist-path'));
+    const benchmarkPath = core.getInput('benchmark-path');
     const outputFile = core.getInput('output-file');
     const baselineFile = core.getInput('baseline-file');
     const perfChange = Number(core.getInput('perf-change'));
@@ -50,34 +45,27 @@ export async function run() {
       return;
     }
 
-    // copy dist to current folder
-    core.startGroup('📂 Copy dist files');
-    // ensure temp folder exists
-    const tempPath = path.join(__dirname, 'temp');
-    fs.mkdirSync(tempPath, { recursive: true });
-    fs.readdirSync(distPath).forEach((file) => {
-      const srcPath = path.join(distPath, file);
-      const destPath = path.join(tempPath, file);
-      // log paths
-      core.info(`Copying ${srcPath} to ${destPath}`);
-      copyRecursive(srcPath, destPath);
-    });
-    core.endGroup();
-
     // Serve the built dist folder
     core.startGroup('Start local server');
     const actionRoot = __dirname;
     server = http.createServer((req, res) => {
-      return handler(req, res, {
-        public: actionRoot
-      });
+      return handler(req, res, {});
     });
 
     await new Promise((resolve) => {
       server.listen(8080, resolve);
     });
     // loop through all benchmark pages
-    const pages = ['http://localhost:8080/benchmarks/sprite/'];
+    const pages = [];
+    const benchmarkFullPath = path.resolve(benchmarkPath);
+    const benchmarkFiles = findRecursive(benchmarkFullPath);
+    benchmarkFiles.forEach((file) => {
+      const relativePath = path.relative(process.cwd(), path.dirname(file));
+      const url = `http://localhost:8080/${relativePath.replace(/\\/g, '/')}/`;
+      pages.push(url);
+      core.info(`Found benchmark page: ${url}`);
+    });
+
     core.endGroup();
 
     // Launch Playwright Chromium
@@ -131,7 +119,7 @@ export async function run() {
           name: prResult.name,
           devFPS: null,
           prFPS: Number(prResult.fps),
-          diffPercent: 'N/A',
+          diffPercent: null,
           regression: false,
           arrow: null
         });
