@@ -143,9 +143,9 @@ ${MARKER}
 `;
     tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow, name }) => {
       const devFPSFormatted = devFPS == null ? '⚠️' : devFPS.toFixed(2);
-      const diffPercentFormatted = diffPercent == null ? '-' : `${diffPercent.toFixed(2)}%`;
+      const diffPercentFormatted = diffPercent == null ? '-' : `${arrow} ${diffPercent.toFixed(2)}%`;
 
-      body += `| ${name} | FPS | ${devFPSFormatted} | ${prFPS.toFixed(2)} | ${arrow} ${diffPercentFormatted} |\n\n`;
+      body += `| ${name} | FPS | ${devFPSFormatted} | ${prFPS.toFixed(2)} | ${diffPercentFormatted} |\n`;
       if (regression) regressionDetected = true;
     });
     body += `
