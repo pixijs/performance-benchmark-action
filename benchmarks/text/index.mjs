@@ -27,7 +27,7 @@ export class Test extends Engine
                 3 * Math.random() * rnd[Math.floor(Math.random() * 2)]
             ];
 
-            const particle = new PIXI.Sprite(this.texture);
+            const particle = new PIXI.Text({ text: '🐰', fontSize: size });
 
             particle.position.set(x, y);
             this.app.stage.addChild(particle);
@@ -57,6 +57,11 @@ export class Test extends Engine
                     else if (r.y > this.height) r.dy *= -1;
                     r.el.position.x = r.x;
                     r.el.position.y = r.y;
+
+                    // Animate the text size to add more CPU load
+                    const newSize = 10 + (Math.random() * 80);
+
+                    r.el.style.fontSize = newSize;
                 }
 
                 this.tick();
@@ -73,7 +78,7 @@ export class Test extends Engine
 
 (async () =>
 {
-    const spriteBenchmark = new Test('Sprites (50k)', 50_000);
+    const spriteBenchmark = new Test('Text (50)', 50);
 
     await spriteBenchmark.init();
     spriteBenchmark.resetMetrics();

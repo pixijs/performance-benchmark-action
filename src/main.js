@@ -26,6 +26,7 @@ function findRecursive(dir, fileList = []) {
 
 export async function run() {
   let server;
+  let browser;
   try {
     const distPath = path.resolve(core.getInput('dist-path'));
     const benchmarkPath = core.getInput('benchmark-path');
@@ -47,7 +48,6 @@ export async function run() {
 
     // Serve the built dist folder
     core.startGroup('Start local server');
-    const actionRoot = __dirname;
     server = http.createServer((req, res) => {
       return handler(req, res, {});
     });
@@ -71,28 +71,30 @@ export async function run() {
     // Launch Playwright Chromium
     core.startGroup('Run headless benchmark in Playwright');
     // force gpu
-    const browser = await chromium.launch({
-      headless: false,
+    browser = await chromium.launch({
+      headless: true,
       args: ['--use-gl=angle']
     });
     const prResults = [];
     for (const pageUrl of pages) {
       const page = await browser.newPage();
-      await page.goto(pageUrl);
+      core.info(`Starting benchmark for: ${pageUrl}`);
 
-      // Wait for benchmark result to appear
-      core.info('Waiting for benchmarkResult...');
-      const resultHandle = await page.waitForFunction(
-        // eslint-disable-next-line no-undef
-        () => window.benchmarkResult,
-        { timeout: 30_000 }
-      );
-      const prResult = await resultHandle.jsonValue();
-      prResults.push(prResult);
-      core.info(`✅ Benchmark completed for ${pageUrl}: ${JSON.stringify(prResult)}`);
-      await page.close();
+      try {
+        await page.goto(pageUrl);
+        // Wait for benchmark result to appear
+        core.info('Waiting for benchmarkResult...');
+        const resultHandle = await page.waitForFunction(() => window.benchmarkResult, { timeout: 30_000 });
+        const prResult = await resultHandle.jsonValue();
+        prResults.push(prResult);
+        core.info(`✅ Benchmark completed for ${pageUrl}: ${JSON.stringify(prResult)}`);
+      } catch (error) {
+        core.setFailed(`Benchmark failed for ${pageUrl}: ${error.message}`);
+        throw error; // Add this to actually stop execution
+      } finally {
+        await page.close();
+      }
     }
-    await browser.close();
 
     fs.writeFileSync(outputFile, JSON.stringify(prResults, null, 2));
     core.info(`🏁 Benchmark result: ${JSON.stringify(prResults, null, 2)}`);
@@ -192,6 +194,23 @@ ${
   } catch (err) {
     core.setFailed(err.message);
   } finally {
-    if (server) server.close();
+    // Graceful teardown so the workflow can exit
+    if (browser) {
+      try {
+        core.info('Shutting down browser...');
+        for (const context of browser.contexts()) {
+          await context.close().catch(() => {});
+        }
+        await browser.close();
+        core.info('Browser shut down.');
+      } catch (e) {
+        core.warning(`Browser close failed: ${e.message}`);
+      }
+    }
+    if (server) {
+      core.info('Shutting down server...');
+      await new Promise((resolve) => server.close(resolve));
+      core.info('Server shut down.');
+    }
   }
 }

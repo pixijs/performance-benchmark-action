@@ -10,7 +10,7 @@ export class Test extends Engine
         // load bunny texture
         await PIXI.Assets.load({
             alias: 'bunny',
-            src: 'https://pixijs.io/examples/examples/assets/bunny.png'
+            src: 'https://pixijs.io/examples/examples/assets/bunny.png',
         });
 
         this.texture = PIXI.Assets.get('bunny');
@@ -24,11 +24,12 @@ export class Test extends Engine
             const y = Math.random() * (this.height - size);
             const [dx, dy] = [
                 3 * Math.random() * rnd[Math.floor(Math.random() * 2)],
-                3 * Math.random() * rnd[Math.floor(Math.random() * 2)]
+                3 * Math.random() * rnd[Math.floor(Math.random() * 2)],
             ];
 
-            const particle = new PIXI.Sprite(this.texture);
+            const particle = new PIXI.Graphics();
 
+            particle.circle(0, 0, size).fill(0xffffff).stroke(0x000000);
             particle.position.set(x, y);
             this.app.stage.addChild(particle);
             particles[i] = { x, y, size, dx, dy, el: particle };
@@ -48,6 +49,9 @@ export class Test extends Engine
                 for (let i = 0; i < this.count; i++)
                 {
                     const r = particles[i];
+
+                    r.el.clear();
+                    r.el.circle(0, 0, r.size).fill(0xffffff).stroke(0x000000);
 
                     r.x -= r.dx;
                     r.y -= r.dy;
@@ -73,7 +77,7 @@ export class Test extends Engine
 
 (async () =>
 {
-    const spriteBenchmark = new Test('Sprites (50k)', 50_000);
+    const spriteBenchmark = new Test('Graphics (100)', 100);
 
     await spriteBenchmark.init();
     spriteBenchmark.resetMetrics();
