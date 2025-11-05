@@ -155,7 +155,13 @@ export async function run() {
       const localResult = await runSingleBenchmark(browser, localURL, `${name} [local]`);
 
       const diffPercent = ((devResult.avg - localResult.avg) / devResult.avg) * 100;
-      const regression = diffPercent > perfChange;
+      // Scale allowed difference relative to an optimistic 60fps target.
+      // If dev FPS is lower than 60, tolerance increases proportionally.
+      // Example: base tolerance 5%, dev=30fps => allowed = 5 * (60/30) = 10%.
+      // If dev FPS is very low, guard against division by zero.
+      const effectiveDevFps = Math.max(devResult.avg, 1);
+      const allowedPercent = perfChange * (60 / effectiveDevFps);
+      const regression = diffPercent > allowedPercent;
       const arrow = diffPercent > 0 ? '🔻' : '🔺';
 
       comparisons.push({
@@ -181,8 +187,8 @@ export async function run() {
     let body = `
 ${MARKER}
 ### PixiJS Benchmark Results (dev CDN vs local dist)
-| Name | dev Avg FPS | local Avg FPS | Δ% | σ(dev/local) | Trend |
-|:-----|-------------:|--------------:|----:|--------------:|:------:|
+| Name | dev Avg FPS | local Avg FPS | Δ% | Trend |
+|:-----|-------------:|--------------:|----:|:------:|
 `;
 
     let regressionDetected = false;
@@ -191,7 +197,7 @@ ${MARKER}
       if (regression) regressionDetected = true;
       body += `| ${name} | ${devResult.avg.toFixed(2)} | ${localResult.avg.toFixed(2)} | ${diffPercent.toFixed(
         2
-      )}% | ${devResult.stddev.toFixed(2)}/${localResult.stddev.toFixed(2)} | ${arrow} |\n`;
+      )}% | ${arrow} |\n`;
     }
 
     body += `
