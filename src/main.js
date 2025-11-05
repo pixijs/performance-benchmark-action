@@ -4,170 +4,231 @@ import { Octokit } from 'octokit';
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import handler from 'serve-handler';
 import http from 'node:http';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-function findRecursive(dir, fileList = []) {
-  const files = fs.readdirSync(dir);
-  files.forEach((file) => {
-    const filePath = path.join(dir, file);
-    const stat = fs.statSync(filePath);
+/**
+ * Recursively find all index.mjs entrypoints under a directory.
+ * @param {string} dir
+ * @param {string[]} list
+ * @returns {string[]}
+ */
+function findIndexModules(dir, list = []) {
+  const entries = fs.readdirSync(dir);
+  for (const entry of entries) {
+    const fp = path.join(dir, entry);
+    const stat = fs.statSync(fp);
     if (stat.isDirectory()) {
-      findRecursive(filePath, fileList);
-    } else {
-      if (filePath.endsWith('.html')) fileList.push(filePath);
+      findIndexModules(fp, list);
+    } else if (entry === 'index.mjs') {
+      list.push(fp);
     }
-  });
-  return fileList;
+  }
+  return list;
+}
+
+/**
+ * Ensure local.html and dev.html exist next to each index.mjs entrypoint.
+ * Adds missing files using provided templates.
+ * @param {string} benchmarkRoot
+ */
+function ensureBenchmarkHtmlTemplates(benchmarkRoot) {
+  core.startGroup('Ensure benchmark HTML pages');
+  const indexFiles = findIndexModules(benchmarkRoot);
+  if (indexFiles.length === 0) {
+    core.info('No index.mjs files found. Skipping template generation.');
+    core.endGroup();
+    return;
+  }
+
+  const localTemplate = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PixiJS Benchmark</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "pixi.js": "/dist/pixi.mjs"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module" src="./index.mjs"></script>
+  </body>
+</html>
+`;
+
+  const devTemplate = `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>PixiJS Benchmark</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "pixi.js": "//cdn.jsdelivr.net/npm/pixi.js@dev/dist/pixi.mjs"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module" src="./index.mjs"></script>
+  </body>
+</html>
+`;
+
+  for (const indexPath of indexFiles) {
+    const dir = path.dirname(indexPath);
+    const localHtml = path.join(dir, 'local.html');
+    const devHtml = path.join(dir, 'dev.html');
+
+    if (!fs.existsSync(localHtml)) {
+      fs.writeFileSync(localHtml, localTemplate);
+      core.info(`Created local.html for ${indexPath}`);
+    } else {
+      core.info(`local.html already exists for ${indexPath}`);
+    }
+
+    if (!fs.existsSync(devHtml)) {
+      fs.writeFileSync(devHtml, devTemplate);
+      core.info(`Created dev.html for ${indexPath}`);
+    } else {
+      core.info(`dev.html already exists for ${indexPath}`);
+    }
+  }
+  core.endGroup();
 }
 
 export async function run() {
   let server;
   let browser;
   try {
-    const distPath = path.resolve(core.getInput('dist-path'));
     const benchmarkPath = core.getInput('benchmark-path');
-    const outputFile = core.getInput('output-file');
-    const baselineFile = core.getInput('baseline-file');
     const perfChange = Number(core.getInput('perf-change'));
     const token = process.env.GITHUB_TOKEN;
 
+    const distPath = path.resolve('./dist');
     if (!fs.existsSync(distPath)) {
       throw new Error(`dist path not found: ${distPath}`);
     }
 
-    // check that pixi.mjs exists
     const pixiPath = path.join(distPath, 'pixi.mjs');
     if (!fs.existsSync(pixiPath)) {
       core.setFailed(`pixi.mjs not found in dist path: ${pixiPath}`);
       return;
     }
 
-    // Serve the built dist folder
     core.startGroup('Start local server');
     server = http.createServer((req, res) => {
-      return handler(req, res, {});
+      return handler(req, res, {
+        rewrites: [
+          { source: '**/dev/', destination: '/$1/dev.html' },
+          { source: '**/local/', destination: '/$1/local.html' }
+        ]
+      });
     });
+    await new Promise((resolve) => server.listen(8080, resolve));
 
-    await new Promise((resolve) => {
-      server.listen(8080, resolve);
-    });
-    // loop through all benchmark pages
-    const pages = [];
     const benchmarkFullPath = path.resolve(benchmarkPath);
-    const benchmarkFiles = findRecursive(benchmarkFullPath);
-    benchmarkFiles.forEach((file) => {
-      const relativePath = path.relative(process.cwd(), path.dirname(file));
-      const url = `http://localhost:8080/${relativePath.replace(/\\/g, '/')}/`;
-      pages.push(url);
-      core.info(`Found benchmark page: ${url}`);
-    });
+    ensureBenchmarkHtmlTemplates(benchmarkFullPath);
 
+    // Build explicit list of dev/local pages from index.mjs entries
+    const indexFiles = findIndexModules(benchmarkFullPath);
+    if (indexFiles.length === 0) {
+      core.setFailed('No index.mjs benchmark entrypoints found.');
+      return;
+    }
+
+    const pages = [];
+    for (const indexFile of indexFiles) {
+      const dir = path.dirname(indexFile);
+      const relDir = path.relative(process.cwd(), dir).replace(/\\/g, '/');
+      pages.push({ variant: 'dev', url: `http://localhost:8080/${relDir}/dev.html` });
+      pages.push({ variant: 'local', url: `http://localhost:8080/${relDir}/local.html` });
+    }
+
+    pages.forEach((p) => core.info(`Discovered benchmark page (${p.variant}): ${p.url}`));
     core.endGroup();
 
-    // Launch Playwright Chromium
-    core.startGroup('Run headless benchmark in Playwright');
-    // force gpu
+    core.startGroup('Run benchmarks (dev vs local)');
     browser = await chromium.launch({
       headless: true,
-      args: ['--use-gl=angle']
+      args: ['--disable-web-security', '--use-gl=angle']
     });
-    const prResults = [];
-    for (const pageUrl of pages) {
-      const page = await browser.newPage();
-      core.info(`Starting benchmark for: ${pageUrl}`);
 
+    const rawResults = [];
+    for (const { url, variant } of pages) {
+      const page = await browser.newPage();
+      core.info(`Starting benchmark (${variant}) -> ${url}`);
       try {
-        await page.goto(pageUrl);
-        // Wait for benchmark result to appear
-        core.info('Waiting for benchmarkResult...');
+        await page.goto(url);
         const resultHandle = await page.waitForFunction(() => window.benchmarkResult, { timeout: 30_000 });
-        const prResult = await resultHandle.jsonValue();
-        prResults.push(prResult);
-        core.info(`✅ Benchmark completed for ${pageUrl}: ${JSON.stringify(prResult)}`);
+        const result = await resultHandle.jsonValue();
+        rawResults.push({ ...result, variant });
+        core.info(`✅ Completed (${variant}) ${result.name}: ${JSON.stringify(result)}`);
       } catch (error) {
-        core.setFailed(`Benchmark failed for ${pageUrl}: ${error.message}`);
-        throw error; // Add this to actually stop execution
+        core.setFailed(`Benchmark failed (${variant}) ${url}: ${error.message}`);
+        throw error;
       } finally {
         await page.close();
       }
     }
-
-    fs.writeFileSync(outputFile, JSON.stringify(prResults, null, 2));
-    core.info(`🏁 Benchmark result: ${JSON.stringify(prResults, null, 2)}`);
     core.endGroup();
 
-    // --- Comparison and PR Comment ---
-    const MARKER = '<!-- PIXIJS_BENCHMARK_COMMENT -->';
-    let body = '';
-    let regressionDetected = false;
-
-    const baselineExists = baselineFile && fs.existsSync(baselineFile);
-
-    // Comparison logic
-    const baseline = JSON.parse(baselineExists ? fs.readFileSync(baselineFile) : '[]');
-    const tableRows = [];
-
-    for (let i = 0; i < pages.length; i++) {
-      const prResult = prResults[i];
-      const baselineResult = baseline[i];
-
-      if (!baselineResult) {
-        core.info(`No baseline result for ${pages[i]}—skip comparison.`);
-        tableRows.push({
-          name: prResult.name,
-          devFPS: null,
-          prFPS: Number(prResult.fps),
-          diffPercent: null,
-          regression: false,
-          arrow: null
-        });
-        continue;
-      }
-
-      const devFPS = Number(baselineResult.fps);
-      const prFPS = Number(prResult.fps);
-      const diffPercent = ((devFPS - prFPS) / devFPS) * 100;
-      const regression = diffPercent > perfChange;
-      const arrow = diffPercent > 0 ? '🔻' : '🔺';
-      tableRows.push({ name: prResult.name, devFPS, prFPS, diffPercent, regression, arrow });
+    // Group results by benchmark name
+    const grouped = new Map();
+    for (const r of rawResults) {
+      if (!grouped.has(r.name)) grouped.set(r.name, {});
+      grouped.get(r.name)[r.variant] = Number(r.fps);
     }
 
-    // Build comment body with comparison
-    body = `
-${MARKER}
-### PixiJS Benchmark Results
-| Name | Metric | dev | PR  | Change |
-|:---|:-------|----:|----:|-------:|
-`;
-    tableRows.forEach(({ devFPS, prFPS, diffPercent, regression, arrow, name }) => {
-      const devFPSFormatted = devFPS == null ? '⚠️' : devFPS.toFixed(2);
-      const diffPercentFormatted = diffPercent == null ? '-' : `${arrow} ${diffPercent.toFixed(2)}%`;
-
-      body += `| ${name} | FPS | ${devFPSFormatted} | ${prFPS.toFixed(2)} | ${diffPercentFormatted} |\n`;
+    // Prepare comparison table rows
+    const tableRows = [];
+    let regressionDetected = false;
+    for (const [name, vals] of grouped.entries()) {
+      const devFPS = vals.dev;
+      const localFPS = vals.local;
+      if (devFPS == null || localFPS == null) {
+        tableRows.push({ name, devFPS, localFPS, diffPercent: null, regression: false, arrow: null });
+        continue;
+      }
+      const diffPercent = ((devFPS - localFPS) / devFPS) * 100; // positive = local slower
+      const regression = diffPercent > perfChange;
       if (regression) regressionDetected = true;
-    });
+      const arrow = diffPercent > 0 ? '🔻' : '🔺';
+      tableRows.push({ name, devFPS, localFPS, diffPercent, regression, arrow });
+    }
+
+    const MARKER = '<!-- PIXIJS_BENCHMARK_COMMENT -->';
+    let body = `
+${MARKER}
+### PixiJS Benchmark Results (dev CDN vs local dist)
+| Name | Metric | dev (CDN) | local (dist) | Change |
+|:-----|:-------|----------:|-------------:|-------:|
+`;
+    for (const row of tableRows) {
+      const devF = row.devFPS == null ? '⚠️' : row.devFPS.toFixed(2);
+      const localF = row.localFPS == null ? '⚠️' : row.localFPS.toFixed(2);
+      const change = row.diffPercent == null ? '-' : `${row.arrow} ${row.diffPercent.toFixed(2)}%`;
+      body += `| ${row.name} | FPS | ${devF} | ${localF} | ${change} |\n`;
+    }
     body += `
 ${
   regressionDetected
-    ? `❌ **Performance regression detected (> ${perfChange}%)**`
+    ? `❌ Performance regression detected (> ${perfChange}% slower than dev)`
     : '✅ Performance within acceptable range'
 }
 `;
 
-    // Post or update GitHub comment
     if (token && github.context.payload.pull_request) {
       const octokit = new Octokit({ auth: token });
       const issueNumber = github.context.payload.pull_request.number;
-
       const { data: comments } = await octokit.rest.issues.listComments({
         ...github.context.repo,
         issue_number: issueNumber
       });
-
       const existing = comments.find((c) => c.body?.includes(MARKER));
       if (existing) {
         await octokit.rest.issues.updateComment({
@@ -187,14 +248,13 @@ ${
     }
 
     if (regressionDetected) {
-      core.setFailed(`Performance regression >${perfChange}% detected!`);
+      core.setFailed(`Performance regression >${perfChange}% (local slower than dev).`);
     } else {
-      core.info('✅ Performance within acceptable range.');
+      core.info('✅ No performance regression detected.');
     }
   } catch (err) {
     core.setFailed(err.message);
   } finally {
-    // Graceful teardown so the workflow can exit
     if (browser) {
       try {
         core.info('Shutting down browser...');
