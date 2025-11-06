@@ -80,27 +80,41 @@ function ensureBenchmarkHtmlTemplates(benchmarkRoot) {
   core.endGroup();
 }
 
-async function runSingleBenchmark(browser, url, label) {
+async function runIsolatedBenchmark(url, label, browserArgs) {
   const sampleFPS = [];
 
   for (let i = 0; i < REPEATS; i++) {
-    const page = await browser.newPage();
-    await page.setViewportSize({ width: 800, height: 600 });
-    await page.goto(url, { waitUntil: 'load', timeout: 60_000 });
-
-    core.info(`Measurement ${i + 1}/${REPEATS} for ${label}`);
-    await page.waitForFunction(() => window.benchmarkResult, {
-      timeout: 60_000
-    });
-    const result = await page.evaluate(() => window.benchmarkResult);
-    sampleFPS.push(result.fps);
-    await page.close();
+    const browser = await chromium.launch({ headless: true, args: browserArgs });
+    try {
+      await runSingleBenchmark(browser, url, label, sampleFPS, i);
+    } finally {
+      try {
+        for (const context of browser.contexts()) {
+          await context.close().catch(() => {});
+        }
+        await browser.close();
+      } catch {
+        throw new Error('Failed to close browser');
+      }
+    }
   }
-
   const avg = sampleFPS.reduce((a, b) => a + b, 0) / sampleFPS.length;
   const stddev = Math.sqrt(sampleFPS.reduce((s, n) => s + (n - avg) ** 2, 0) / sampleFPS.length);
-
   return { avg, stddev, samples: sampleFPS };
+}
+
+async function runSingleBenchmark(browser, url, label, sampleFPS, i) {
+  const page = await browser.newPage();
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.goto(url, { waitUntil: 'load', timeout: 60_000 });
+
+  core.info(`Measurement ${i + 1}/${REPEATS} for ${label}`);
+  await page.waitForFunction(() => window.benchmarkResult, {
+    timeout: 60_000
+  });
+  const result = await page.evaluate(() => window.benchmarkResult);
+  sampleFPS.push(result.fps);
+  await page.close();
 }
 
 export async function run() {
@@ -129,14 +143,7 @@ export async function run() {
     const indexFiles = findIndexModules(benchmarkFullPath);
     if (indexFiles.length === 0) throw new Error('No index.mjs benchmark entrypoints found.');
 
-    const browserArgs = [
-      '--use-gl=angle',
-      '--disable-web-security'
-    ];
-
-    core.startGroup('Launch browser');
-    browser = await chromium.launch({ headless: true, args: browserArgs });
-    core.endGroup();
+    const browserArgs = ['--use-gl=angle', '--disable-web-security'];
 
     const comparisons = [];
     core.startGroup('Run dev vs local benchmarks');
@@ -151,8 +158,8 @@ export async function run() {
 
       core.info(`Benchmark: ${name}`);
 
-      const devResult = await runSingleBenchmark(browser, devURL, `${name} [dev]`);
-      const localResult = await runSingleBenchmark(browser, localURL, `${name} [local]`);
+      const devResult = await runIsolatedBenchmark(devURL, `${name} [dev]`, browserArgs);
+      const localResult = await runIsolatedBenchmark(localURL, `${name} [local]`, browserArgs);
 
       const diffPercent = ((devResult.avg - localResult.avg) / devResult.avg) * 100;
       // Scale allowed difference relative to an optimistic 60fps target.
